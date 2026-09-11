@@ -1,0 +1,13 @@
+# 脚本换行必须锁死为 CRLF：
+#   PowerShell 5.1 与 cmd.exe 都按 CRLF 预期解析；被规范化成 LF 会重现历史坑。
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 其余文本统一按 LF 存储
+*.md   text eol=lf
+*.go   text eol=lf
+*.mod  text eol=lf
+
+# 二进制
+*.exe binary
