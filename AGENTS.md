@@ -9,7 +9,7 @@
 | 新项目立项 / 命名 / 端口登记 / 提交规范 `type(scope): 描述` | skill `repo-discipline` |
 | 长会话成本 / `收尾`·`读档`·`继续` / 《收尾 通用序列》 | skill `context-discipline` |
 | 架构原理 / 用法 / 排障 / 验收标准 | `README.md` |
-| 状态（进度 / 决策+理由 / 坑位 / 下一步） | `HANDOFF.md`（每次收尾重写） |
+| 状态（进度 / 决策+理由 / 坑位 / 下一步） | `.memory/HANDOFF.md`（每次收尾重写） |
 
 > 注：`repo-discipline` / `context-discipline` 是维护者本地的 AI 工具链 skill，贡献者没有也无妨——
 > 贡献者只需遵守下方「项目红线」与 README 的提交/验收要求。
@@ -30,12 +30,13 @@
 
 ## 项目对通用流程的覆盖 / 例外
 
-- **不建 `docs/PROGRESS.md`**：项目流水由 `.workbuddy/memory/YYYY-MM-DD.md` 承担，只追加（本目录已 gitignore 不入库）。
+- **不建 `.memory/PROGRESS.md`**：项目流水由 `.workbuddy/memory/YYYY-MM-DD.md` 承担，只追加（本目录已 gitignore 不入库）。
 - 本项目验证命令（收尾第 1 步用）：
   `python tools/fix-encoding.py` → `powershell -File tools\test-common.ps1`（改 hosts 逻辑时）→ `6-体检.bat`
 - hosts 相关状态档案在 `docs/hosts归零-根因报告.md`。
 
 ## 交接
 
-- 冷启动：读 `HANDOFF.md` + memory → 复述确认 → 再动手（见 context-discipline）。
+- 冷启动：读 `.memory/HANDOFF.md` + memory → 复述确认 → 再动手（见 context-discipline）。
+- 状态文档 `.memory/HANDOFF.md` 沿用 `.gitignore` 的 `HANDOFF.md` 忽略项，**仅本地留存不入库**（开源预备口径；本项目仍不建 PROGRESS，流水归 daily memory）。
 - 收尾后提示主人换会话；`收尾`/`读档`/`继续` 三段循环定义见 skill，此处不复述。
