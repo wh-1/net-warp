@@ -42,7 +42,7 @@ from pathlib import Path
 # 与 templates/pre-commit 的 GUARD-HOOK-VERSION 是**两件事**（2026-09-25 澄清，
 # 原文写「成对改」会误导）：钩子认的是本脚本的**命令行契约**（`--staged --quiet`），
 # 契约不变则钩子版本无需跟动；下游按路径引用本脚本 ⇒ 仅新增/调整判据自动生效。
-GUARD_SCRIPT_VERSION = "1.2.3"
+GUARD_SCRIPT_VERSION = "1.2.4"
 
 try:
     import tomllib            # Python ≥ 3.11；旧解释器退回文本启发式
@@ -166,7 +166,7 @@ def load_ignores(root: Path) -> set[str]:
     两种粒度：
       · 裸项名         = 整个检查项豁免（如 `README ≤ 200 行`）
       · `项名: 路径`   = 只豁免该项下的**某个具体对象**（如 `领域目录准入: ide/ide-vscode`）
-        路径粒度是为第 22 项这类**全局遍历型检查**准备的 —— 它一次扫所有领域目录，
+        路径粒度是为第 24 项这类**全局遍历型检查**准备的 —— 它一次扫所有领域目录，
         没路径粒度就只能整项豁免（等于关掉整个检查），代价太大。
     """
     f = root / ".repo-guard-ignore"
@@ -212,6 +212,33 @@ def _upstream_root() -> "Path | None":
         if (c / "scripts" / "repo-guard.py").is_file() and (c / "templates").is_dir():
             return c
     return None
+
+
+def _lint_state(root: Path) -> "tuple[str | None, bool, str]":
+    """返回 (语言, 是否有 lint/格式配置, 建议)。
+
+    只判**有明确配置文件**的语言：Rust(clippy)/Java(checkstyle 由构建带)/C# 由工具链自带，
+    缺文件不等于没规范 ⇒ 返回 `None` 表示不判，避免制造噪声。
+    """
+    if (root / "pyproject.toml").is_file() or (root / "requirements.txt").is_file():
+        has = (root / "ruff.toml").is_file() or (root / ".ruff.toml").is_file()
+        if not has and (root / "pyproject.toml").is_file():
+            try:
+                has = b"[tool.ruff" in (root / "pyproject.toml").read_bytes()
+            except OSError:
+                has = False
+        return "python", has, "ruff 配置（`pyproject.toml` 的 `[tool.ruff]` 或 `ruff.toml`）"
+    if (root / "package.json").is_file():
+        has = bool(list(root.glob(".eslintrc*")) or list(root.glob("eslint.config.*")))
+        if not has:
+            try:
+                has = b'"eslint"' in (root / "package.json").read_bytes()
+            except OSError:
+                has = False
+        return "node", has, "eslint 配置（`.eslintrc*` / `eslint.config.*`）"
+    if (root / "go.mod").is_file():
+        return "go", bool(list(root.glob(".golangci.*"))), "`.golangci.*`（`go vet` 内置，不算配置）"
+    return None, True, ""
 
 
 def _big_tracked(root: Path, mb: int) -> "list[tuple[float, str]]":
@@ -411,7 +438,7 @@ def _reqs_pinned(root: Path) -> tuple[int, int]:
 
 
 def run_checks(root: Path, staged: bool = False, ci: bool = False) -> tuple[list[str], list[str], list[str]]:
-    """对单个项目执行 21 项机检，返回 (fails, warns, lines)。不打印。
+    """对单个项目执行 23 项机检，返回 (fails, warns, lines)。不打印。
 
     `ci=True` = **服务端（GitHub Actions 等）全量判定**：
       - 为什么不用 `--staged`：CI 是干净检出，暂存区恒空 ⇒ `git diff --cached` 必然为空
@@ -739,6 +766,28 @@ def run_checks(root: Path, staged: bool = False, ci: bool = False) -> tuple[list
     else:
         emit(True, f"无超大文件入库（>{BIG_FILE_MB}MB）")
 
+    # 22) 语言 lint / 格式配置（观察级）—— 规范 19.8
+    #     只判「有明确配置文件」的语言；Rust / Java / C# 由工具链自带，不判。
+    lang, has_lint, hint = _lint_state(root)
+    emit(has_lint, "语言 lint / 格式配置已下发",
+         f"{lang} 项目未见 {hint}（规范 19.8：lint 命令要能真跑起来，不能只写在 AGENTS 里）"
+         if lang else "", level="WARN")
+
+    # 23) 远端协议 —— 本机 https 走代理不稳（8.x 既定纪律）
+    #     纯本地仓无 remote ⇒ 不适用，直接 PASS 不刷屏。
+    remotes = git("remote", cwd=root).split()
+    if not remotes:
+        emit(True, "远端使用 ssh 协议", "无远端（纯本地仓，不适用）")
+    else:
+        bad_url = []
+        for r in remotes:
+            u = git("remote", "get-url", r, cwd=root)
+            if u and not u.startswith(("git@", "ssh://")):
+                bad_url.append(f"`{r}` = {u}")
+        emit(not bad_url, "远端使用 ssh 协议",
+             "；".join(bad_url) + " → 改 ssh：`git remote set-url <名> git@gh-<别名>:<owner>/<repo>.git`"
+             "（https 在本机受代理影响，README 8.x）", level="WARN")
+
     return f2, w2, lines
 
 
@@ -811,7 +860,7 @@ def _looks_like_project(d: Path) -> bool:
 
 
 def check_domain_level() -> tuple[list[str], list[str], list[str]]:
-    r"""领域目录准入检查（**第 22 项**）：领域目录下只允许「项目目录 + `_archive\`」。
+    r"""领域目录准入检查（**第 24 项**）：领域目录下只允许「项目目录 + `_archive\`」。
 
     依据 README §二「领域目录准入清单」（2026-09-25 定稿）—— 领域目录是**项目的容器不是工作台**。
     三级判定（**不能只看有没有 `.git`**，见 `_looks_like_project`）：
@@ -973,7 +1022,7 @@ def run_batch(staged: bool, ci: bool = False) -> int:
         print("  [PASS] 顶层只有 12 个领域目录 + _archive")
     print("-" * 62)
     dl_fails, dl_warns, dl_lines = check_domain_level()
-    print(f"【领域目录准入检查】各领域目录（README 二章「领域目录准入」，第 22 项）")
+    print(f"【领域目录准入检查】各领域目录（README 二章「领域目录准入」，第 24 项）")
     if dl_fails or dl_warns:
         for ln in dl_lines:
             print(ln)
@@ -1029,7 +1078,7 @@ def run_batch(staged: bool, ci: bool = False) -> int:
                  f"- 范围：{W_DEV} 下 {len(results)} 个 git 项目",
                  f"- 结果：活项目 {len(live)}（FAIL {len(bad_live)}）/ 归档 {len(arch)}（FAIL {len(bad_arch)}，不阻断）",
                  f"- 顶层准入（README 二章）：{len(tl_fails)} 项违规" + (f" —— {'、'.join(tl_fails)}" if tl_fails else ""), ""]
-    lines_out.append(f"- 领域目录准入（README 二章，第 22 项）：{len(dl_fails)} 项违规、{len(dl_warns)} 项 WARN" +
+    lines_out.append(f"- 领域目录准入（README 二章，第 24 项）：{len(dl_fails)} 项违规、{len(dl_warns)} 项 WARN" +
                      (f" —— {'、'.join(dl_fails)}" if dl_fails else ""))
     linept = f"- 领域目录准入 WARN（未初始化项目，建议 git init）：{'、'.join(dl_warns)}" if dl_warns else ""
     if linept:
