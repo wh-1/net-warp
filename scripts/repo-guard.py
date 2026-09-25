@@ -42,7 +42,7 @@ from pathlib import Path
 # 与 templates/pre-commit 的 GUARD-HOOK-VERSION 是**两件事**（2026-09-25 澄清，
 # 原文写「成对改」会误导）：钩子认的是本脚本的**命令行契约**（`--staged --quiet`），
 # 契约不变则钩子版本无需跟动；下游按路径引用本脚本 ⇒ 仅新增/调整判据自动生效。
-GUARD_SCRIPT_VERSION = "1.2.2"
+GUARD_SCRIPT_VERSION = "1.2.3"
 
 try:
     import tomllib            # Python ≥ 3.11；旧解释器退回文本启发式
