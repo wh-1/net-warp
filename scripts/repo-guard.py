@@ -125,11 +125,15 @@ CHANGELOG_SEC_RE = re.compile(
 #     `Invalid statement (at line 1, column 1)`
 #   · `net-warp/.gitignore` 首行带 BOM ⇒ 该行**不再被识别为规则 / 注释**，
 #     若首行恰是忽略规则，规则会**静默失效**（安全类）
-# `.ps1` / `.bat` / `.cmd` 的 BOM 是平台正确姿势（PS 5.1 读中文需要）⇒ 跳过。
+# `.ps1` / `.bat` / `.cmd` 的 BOM 是平台正确姿势（PS 5.1 读中文需要）⇒ 跳过；
+# `.sln` / `.csproj` / `.xaml` / `.cs` 由 VS / MSBuild 生成时默认带 BOM，剥掉会被工具写回（2026-09-25 实测 gis 三仓）⇒ 同样跳过。
 BOM = b"\xef\xbb\xbf"
 BOM_PARSER_EXTS = {".toml"}                    # 解析器会直接报错
 BOM_PARSER_NAMES = {"go.mod"}
-BOM_SKIP_EXTS = {".ps1", ".psm1", ".psd1", ".bat", ".cmd"}
+BOM_SKIP_EXTS = {
+    ".ps1", ".psm1", ".psd1", ".bat", ".cmd",   # Windows 脚本：PS 5.1 读中文需要 BOM
+    ".sln", ".csproj", ".xaml", ".cs",          # .NET：VS / MSBuild 默认写 BOM，剥了会被工具写回
+}
 
 # ---- 第 17 项 依赖锁定文件（规范 17.2） ----
 # 判据细化过的两类「不算缺失」（全库标定把 9 处误报压到 0）：
