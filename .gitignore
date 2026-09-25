@@ -1,4 +1,4 @@
-﻿# ---- 运行时产物 ----
+# ---- 运行时产物 ----
 logs/
 *.log
 hosts-backup/
@@ -23,3 +23,6 @@ _*.txt
 # ---- 测试再生输出 ----
 tools/common-test.txt
 tools/common-test-work/
+
+# 工具 / 编辑器产出的备份文件（含提交门升级备份 pre-commit.bak）
+*.bak
