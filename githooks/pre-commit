@@ -1,0 +1,59 @@
+#!/bin/sh
+# GUARD-HOOK-VERSION: 1.0.1
+# repo-discipline 提交门（下游标准版）—— 守护者：repo-guard.py --staged（只判本次带进来的问题）
+#
+# 规范正文：D:\w-dev\common\repo-discipline\README.md
+# 安装 / 升级 / 自检：bash <repo-discipline>/scripts/install-guard.sh <项目路径> [--check]
+# 手动绕过：git commit --no-verify（不建议）
+#
+# ★ 三条设计底线（2026-09-24 定，改之前先读，别退回旧写法）：
+#   1. **不写死本机绝对路径**：旧版 GUARD="D:/w-dev/..." 换机即失效；且用 `|| exit 0` 兜
+#      ⇒ 门悄悄没了还无人察觉。现在两级定位都失败时**打印提示再跳过**，绝不静默。
+#   2. **本文件必须 LF**：`autocrlf=true` 下若没锁行尾，重新检出就被写成 CRLF，Git 直接报
+#      `bad interpreter: /bin/sh^M`，而 `git status` 毫无提示 ⇒ 门静默失效（守卫第 16 项已机检）。
+#      安装器 install-guard.sh 会自动在目标仓库 .gitattributes 加锁 `githooks/* text eol=lf`。
+#   3. **只判增量（--staged）**：存量违规不阻断历史项目的日常提交，全量体检另跑 --all。
+TOP="$(git rev-parse --show-toplevel)" || exit 1
+cd "$TOP" || exit 1
+
+echo "[repo-guard] hook v1.0.1 生效中"
+
+# ── 定位守卫：① 本机覆盖 ② 上溯两层默认推导 ────────────────────────────
+GUARD=""
+GUARD_SRC=""
+if [ -f ".local/hooks-guard-path" ]; then
+  GUARD="$(head -n 1 .local/hooks-guard-path 2>/dev/null | tr -d '\r')"
+  GUARD_SRC=".local/hooks-guard-path"
+else
+  WDEV="$(printf '%s\n' "$TOP" | sed 's#/[^/]*/[^/]*$##')"
+  CAND="$WDEV/common/repo-discipline/scripts/repo-guard.py"
+  [ -f "$CAND" ] && GUARD="$CAND" && GUARD_SRC="上溯两层推导"
+fi
+if [ -z "$GUARD" ] || [ ! -f "$GUARD" ]; then
+  echo "[repo-guard] 未找到 repo-guard.py（已试 .local/hooks-guard-path 与上溯两层）→ 本次不检查"
+  echo "             启用：把绝对路径写入 .local/hooks-guard-path（本机私有，不入库）"
+  echo "             重装：bash <repo-discipline>/scripts/install-guard.sh \"$TOP\""
+  exit 0
+fi
+
+# ── 找解释器：python → python3 → py（跨机器交付必须容忍三种命名）─────────
+PY=""
+for c in python python3 py; do
+  if command -v "$c" >/dev/null 2>&1; then PY="$c"; break; fi
+done
+if [ -z "$PY" ]; then
+  echo "[repo-guard] 未找到 python（已试 python / python3 / py）→ 本次不检查"
+  exit 0
+fi
+
+echo "[repo-guard] 守卫= $GUARD（来源：$GUARD_SRC；解释器：$PY）"
+
+if ! "$PY" "$GUARD" --staged --quiet; then
+  echo ""
+  echo "============================================================"
+  echo "[repo-guard] 本次提交带入合规问题 → 提交已拒绝"
+  echo "修完再提交；确需绕过：git commit --no-verify"
+  echo "存量违规可在 .repo-guard-ignore 中显式豁免（整改后删除）"
+  echo "============================================================"
+  exit 1
+fi
