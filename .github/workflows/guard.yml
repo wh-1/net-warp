@@ -1,4 +1,4 @@
-# GUARD-WORKFLOW-VERSION: 1.1.0
+# GUARD-WORKFLOW-VERSION: 1.2.0
 # repo-discipline CI 兜底 —— 为什么必须有这一道（2026-09-24 定）：
 #   本地 pre-commit 能被 `git commit --no-verify` 一句话绕过去；而 `core.hooksPath` 是
 #   **local 级 git config**，不随 clone 传播 ⇒ 换台机器拉下来的仓压根没有门。
@@ -20,6 +20,16 @@
 #   4. **密钥扫描不用 gitleaks-action，用官方二进制钉版本（2026-09-25）**：
 #      gitleaks-action v2 对组织私有仓要 license；且少一个 action 就少一个要钉 SHA / 跟着升级的面。
 #      官方二进制 + `fetch-depth: 0` 等价能力（全历史扫描），版本升级 = 改一行 URL。
+#   5. **★ 额度友好（2026-09-25 v1.2.0，私有仓按分钟计费）**：CI 每分钟都是钱，但
+#      **省钱的前提是不让守卫静默失效** —— 只砍「重复 / 无效」的跑，不砍覆盖面：
+#        · `concurrency.cancel-in-progress` —— 连续 push 只跑**最后一次**（旧 run 直接取消）；
+#        · `paths-ignore` —— 只排除**会话记忆 / 快照文档**（每次收尾必变、且不含代码与规范），
+#          **不排除 `*.md`**：CHANGELOG / AGENTS / README 正是规范检查的对象，排掉等于自废武功；
+#        · 密钥扫描**分层**：push / PR 扫**本次变更提交**，全历史交给**每周定时**兜底
+#          （全历史最贵，但它防的「旧密钥藏在早期提交」不需要每次 push 都查一遍）；
+#        · 合规检查与密钥扫描**合进一个 job** —— 少一次 runner 启动 + 一次 checkout。
+#      不做的两件事：① **不按分支过滤**（漏触发 ⇒ 守卫静默消失，比多跑几次严重得多）；
+#      ② **不合并成「只跑一次」** —— 本地门每次提交都跑，CI 减少的是**重复跑**，不是覆盖面。
 #
 # 为什么没有 actions/setup-python：repo-guard.py 只用标准库，`python3` 直接跑，
 # 少一个 action 就少一个要跟着升级 / 钉 SHA 的面。
@@ -28,7 +38,19 @@ name: repo-guard
 
 on:
   push:
+    paths-ignore:                  # ★ 只排除「不含代码与规范」的目录，别拿它省一切
+      - '.workbuddy/memory/**'     # 会话记忆：纯文本、每次收尾都变
+      - '.memory/**'               # 状态文档（HANDOFF / PROGRESS）
+      - 'docs/**'                  # 报告快照
   pull_request:
+  schedule:
+    - cron: '17 3 * * 1'           # 每周一 03:17 UTC —— 全历史密钥兜底（额度友好时段）
+  workflow_dispatch:               # 手动触发时跑全历史（见下方 if 判定）
+
+# 连续 push 时只保留最后一次：旧 run 直接取消，不烧分钟
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 # 最小权限：本工作流只读代码，不需要写任何东西
 permissions:
@@ -36,7 +58,7 @@ permissions:
 
 jobs:
   guard:
-    name: repo-guard 合规检查
+    name: repo-guard 合规检查 + 密钥扫描
     runs-on: ubuntu-latest
     steps:
       - name: 检出代码
@@ -51,22 +73,24 @@ jobs:
       - name: 合规检查（CI 全量模式）
         run: python3 scripts/repo-guard.py --ci
 
-  gitleaks:
-    name: gitleaks 密钥全历史扫描
-    runs-on: ubuntu-latest
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          fetch-depth: 0               # 全历史必扫：旧密钥最爱藏在早期提交里（主流踩坑第一名 = 浅克隆漏扫）
-          persist-credentials: false
-
       - name: 安装 gitleaks（官方二进制，钉版本 v8.30.1）
         run: |
           curl -sSL --fail "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz" | tar -xz
           ./gitleaks version
 
-      - name: 全历史密钥扫描（命中即 FAIL）
+      # 分层：日常只扫本次变更；全历史留给每周定时 / 手动（全扫最贵，但不必每次跑）
+      - name: 密钥扫描（本次变更提交）
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+        run: |
+          BEFORE="${{ github.event.before }}"
+          # 首次推送 / 事件未带 before（PR 的部分事件类型）⇒ 退回最近一个提交
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            BEFORE="HEAD~1"
+          fi
+          ./gitleaks detect --source . --log-opts "$BEFORE..HEAD" --exit-code 1 --redact -v
+
+      - name: 密钥扫描（全历史兜底）
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: ./gitleaks detect --source . --exit-code 1 --redact -v
-        # 首跑若历史命中：先人工审，确属占位符 / 已轮换密钥再用 `.gitleaksignore`
+        # 命中即 FAIL。确属占位符 / 已轮换密钥 → 先人工审，再用 `.gitleaksignore`
         # 按 fingerprint 豁免（先审再豁，不当静音；豁免条目要季度复查）
