@@ -1,0 +1,49 @@
+# GUARD-WORKFLOW-VERSION: 1.0.0
+# repo-discipline CI 兜底 —— 为什么必须有这一道（2026-09-24 定）：
+#   本地 pre-commit 能被 `git commit --no-verify` 一句话绕过去；而 `core.hooksPath` 是
+#   **local 级 git config**，不随 clone 传播 ⇒ 换台机器拉下来的仓压根没有门。
+#   ⇒ 凡**公开仓 / 有多人协作**的项目，必须在服务端补这一道。
+#
+# 下发与刷新（别手抄这个文件）：
+#   bash <repo-discipline>/scripts/install-guard.sh <项目路径> --with-ci
+#   它会一并下发 `scripts/repo-guard.py` 副本；上游升级后重跑同一命令即可对齐，
+#   本仓内容是否与上游一致用 `--check` 现场比对（`cmp -s`，不写死 hash）。
+#
+# ★ 三条设计底线（改之前先读，别退回旧写法）
+#   1. **CI 里绝不能用 `--staged`**：CI 是干净检出，暂存区恒空 ⇒ `git diff --cached` 必空
+#      ⇒ 密钥扫描**假 PASS**（守卫不报错，只是它什么都没看到，输出和真干净一模一样）。
+#      服务端没有「本次提交」的概念，只跑全量 `--ci` —— 它会把密钥项由 WARN 升到 FAIL。
+#   2. **action 一律钉 commit SHA**：浮动标签（`@v4`）可被作者移动，在多数流水线里等价于
+#      把远端代码拉进有凭据的环境执行。SHA 后面**必须留版本号注释**，否则无人知道该升到哪个 commit。
+#   3. **副本与上游对齐靠 `cmp`，不靠写死 hash**：把 hash / 体积写死在这里，上游一升级就变成
+#      「永远失败」，最后被人整段删掉 ⇒ 守卫静默消失。同步与验证命令见项目 AGENTS.md。
+#
+# 为什么没有 actions/setup-python：repo-guard.py 只用标准库，`python3` 直接跑，
+# 少一个 action 就少一个要跟着升级 / 钉 SHA 的面。
+
+name: repo-guard
+
+on:
+  push:
+  pull_request:
+
+# 最小权限：本工作流只读代码，不需要写任何东西
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: repo-guard 合规检查
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0               # 守卫要读提交历史 / 入库文件清单，浅克隆会漏判
+          persist-credentials: false   # 检出后不留凭据，后续步骤拿不到 token
+
+      - name: 守卫版本（便于症状对照）
+        run: python3 scripts/repo-guard.py --version
+
+      - name: 合规检查（CI 全量模式）
+        run: python3 scripts/repo-guard.py --ci

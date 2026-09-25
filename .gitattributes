@@ -13,3 +13,5 @@
 *.exe binary
 # repo-guard 提交门：钩子必须 LF（CRLF 会让门静默失效）
 githooks/* text eol=lf
+# repo-guard CI 兜底：工作流与守卫副本须 LF（与上游逐字节可比）
+.github/workflows/* text eol=lf
