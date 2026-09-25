@@ -32,6 +32,7 @@
 """
 import argparse
 import datetime
+import os
 import re
 import subprocess
 import sys
@@ -165,7 +166,7 @@ def load_ignores(root: Path) -> set[str]:
     两种粒度：
       · 裸项名         = 整个检查项豁免（如 `README ≤ 200 行`）
       · `项名: 路径`   = 只豁免该项下的**某个具体对象**（如 `领域目录准入: ide/ide-vscode`）
-        路径粒度是为第 20 项这类**全局遍历型检查**准备的 —— 它一次扫所有领域目录，
+        路径粒度是为第 22 项这类**全局遍历型检查**准备的 —— 它一次扫所有领域目录，
         没路径粒度就只能整项豁免（等于关掉整个检查），代价太大。
     """
     f = root / ".repo-guard-ignore"
@@ -184,6 +185,75 @@ def _scoped_ignores(prefix: str, root: Path) -> set[str]:
             if k.strip() == prefix:
                 out.add(v.strip().replace("\\", "/"))
     return out
+
+
+# ---------------- 第 20 / 21 项规则（2026-09-25 新增） ----------------
+
+# 钩子版本标记（模板与下发副本都带；双门 / 自定义门没有 ⇒ 跳过不误报）
+HOOK_VER_RE = re.compile(r"GUARD-HOOK-VERSION[:= ]+([0-9]+\.[0-9]+\.[0-9]+)")
+# 已入库单文件告警阈值（MB）——**观察级**：先提示，不阻断
+BIG_FILE_MB = 50
+# 上游（repo-discipline 本体）定位：换机器时用环境变量覆盖
+UPSTREAM_ENV = "REPO_DISCIPLINE_HOME"
+
+
+def _upstream_root() -> "Path | None":
+    """定位 repo-discipline 本体（下发物的上游），找不到返回 None。
+
+    下游副本与上游逐字节比对才知道「模板改了但项目没跟上」。
+    上游不可达（换机器 / 路径变了）时**整项不判** —— 制造噪声比漏报更伤。
+    """
+    cands: list[Path] = []
+    env = os.environ.get(UPSTREAM_ENV)
+    if env:
+        cands.append(Path(env))
+    cands.append(W_DEV / "common" / "repo-discipline")
+    for c in cands:
+        if (c / "scripts" / "repo-guard.py").is_file() and (c / "templates").is_dir():
+            return c
+    return None
+
+
+def _big_tracked(root: Path, mb: int) -> "list[tuple[float, str]]":
+    """已入库且 > mb MB 的 [(size_mb, path)]。
+
+    取 **blob 大小**而非工作区大小：工作区的大文件可能已被 .gitignore 挡住（未入库），
+    那不算违规；只有真进库的才占 clone 体积。用 `cat-file --batch-check` 一次批量取，
+    避免逐文件 spawn。
+    """
+    out = git("ls-files", "-s", cwd=root)
+    if not out:
+        return []
+    shas: list[str] = []
+    paths: list[str] = []
+    for ln in out.splitlines():
+        parts = ln.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        meta = parts[0].split()
+        if len(meta) < 2:
+            continue
+        shas.append(meta[1])
+        paths.append(parts[1])
+    if not shas:
+        return []
+    try:
+        r = subprocess.run(["git", "cat-file", "--batch-check=%(objectsize)"],
+                           input="\n".join(shas), cwd=str(root), capture_output=True,
+                           text=True, encoding="utf-8", errors="replace")
+        sizes = r.stdout.split()
+    except Exception:  # noqa: BLE001 — 探测失败就当没大文件，不做判据
+        return []
+    big: list[tuple[float, str]] = []
+    for path, s in zip(paths, sizes):
+        try:
+            v = int(s) / 1048576
+        except ValueError:
+            continue
+        if v > mb:
+            big.append((v, path))
+    big.sort(reverse=True)
+    return big
 
 
 def git(*args: str, cwd: Path) -> str:
@@ -341,7 +411,7 @@ def _reqs_pinned(root: Path) -> tuple[int, int]:
 
 
 def run_checks(root: Path, staged: bool = False, ci: bool = False) -> tuple[list[str], list[str], list[str]]:
-    """对单个项目执行 19 项机检，返回 (fails, warns, lines)。不打印。
+    """对单个项目执行 21 项机检，返回 (fails, warns, lines)。不打印。
 
     `ci=True` = **服务端（GitHub Actions 等）全量判定**：
       - 为什么不用 `--staged`：CI 是干净检出，暂存区恒空 ⇒ `git diff --cached` 必然为空
@@ -632,6 +702,43 @@ def run_checks(root: Path, staged: bool = False, ci: bool = False) -> tuple[list
              " —— 约定入库文本无 BOM（`.ps1` / `.bat` / `.cmd` 已排除，其 BOM 是平台要求）",
              level="WARN")
 
+    # 20) 下发物与上游一致（**模板漂移**，只报不改）
+    #     背景：install-guard.sh 只幂等升级「提交门」相关下发物；模板（守卫副本 / CI 工作流 /
+    #     钩子模板）改了之后，存量项目并不感知 —— 过去全靠人肉批处理（见 2026-09-25 #25）。
+    #     这里做**只读比对**：不一致只 WARN，同步动作仍走安装器（时机由人决定）。
+    #     钩子按**版本号**比而非逐字节：双门 / 本仓自用钩子本就与模板不同，逐字节必误报。
+    up = _upstream_root()
+    if up is not None:
+        drift: list[str] = []
+        for rel, up_rel in (("scripts/repo-guard.py", "scripts/repo-guard.py"),
+                            (".github/workflows/guard.yml", "templates/guard-workflow.yml")):
+            lp, rp = root / rel, up / up_rel
+            if lp.is_file() and rp.is_file() and lp.read_bytes() != rp.read_bytes():
+                drift.append(f"`{rel}` ≠ 上游 `{up_rel}`")
+        h = root / "githooks/pre-commit"
+        t = up / "templates/pre-commit"
+        if h.is_file() and t.is_file():
+            m1 = HOOK_VER_RE.search(h.read_bytes().decode("utf-8", "replace"))
+            m2 = HOOK_VER_RE.search(t.read_bytes().decode("utf-8", "replace"))
+            if m1 and m2 and m1.group(1) != m2.group(1):
+                drift.append(f"钩子版 {m1.group(1)} ≠ 模板 {m2.group(1)}")
+        if drift:
+            emit(False, "下发物与上游一致（模板漂移）",
+                 "；".join(drift) + " → 跑 install-guard.sh 同步（本项只报不改，不改文件）",
+                 level="WARN")
+        else:
+            emit(True, "下发物与上游一致（模板漂移）")
+
+    # 21) 已入库大文件（观察级）：git 不适合存大二进制，clone 体积是所有人付的成本
+    big = _big_tracked(root, BIG_FILE_MB)
+    if big:
+        emit(False, f"无超大文件入库（>{BIG_FILE_MB}MB）",
+             "；".join(f"`{p}` {s:.0f}MB" for s, p in big[:5]) +
+             ("…" if len(big) > 5 else "") +
+             " → 走 git-lfs 或移出仓库（规范 11.2）", level="WARN")
+    else:
+        emit(True, f"无超大文件入库（>{BIG_FILE_MB}MB）")
+
     return f2, w2, lines
 
 
@@ -704,7 +811,7 @@ def _looks_like_project(d: Path) -> bool:
 
 
 def check_domain_level() -> tuple[list[str], list[str], list[str]]:
-    r"""领域目录准入检查（**第 20 项**）：领域目录下只允许「项目目录 + `_archive\`」。
+    r"""领域目录准入检查（**第 22 项**）：领域目录下只允许「项目目录 + `_archive\`」。
 
     依据 README §二「领域目录准入清单」（2026-09-25 定稿）—— 领域目录是**项目的容器不是工作台**。
     三级判定（**不能只看有没有 `.git`**，见 `_looks_like_project`）：
@@ -866,7 +973,7 @@ def run_batch(staged: bool, ci: bool = False) -> int:
         print("  [PASS] 顶层只有 12 个领域目录 + _archive")
     print("-" * 62)
     dl_fails, dl_warns, dl_lines = check_domain_level()
-    print(f"【领域目录准入检查】各领域目录（README 二章「领域目录准入」，第 20 项）")
+    print(f"【领域目录准入检查】各领域目录（README 二章「领域目录准入」，第 22 项）")
     if dl_fails or dl_warns:
         for ln in dl_lines:
             print(ln)
@@ -922,7 +1029,7 @@ def run_batch(staged: bool, ci: bool = False) -> int:
                  f"- 范围：{W_DEV} 下 {len(results)} 个 git 项目",
                  f"- 结果：活项目 {len(live)}（FAIL {len(bad_live)}）/ 归档 {len(arch)}（FAIL {len(bad_arch)}，不阻断）",
                  f"- 顶层准入（README 二章）：{len(tl_fails)} 项违规" + (f" —— {'、'.join(tl_fails)}" if tl_fails else ""), ""]
-    lines_out.append(f"- 领域目录准入（README 二章，第 20 项）：{len(dl_fails)} 项违规、{len(dl_warns)} 项 WARN" +
+    lines_out.append(f"- 领域目录准入（README 二章，第 22 项）：{len(dl_fails)} 项违规、{len(dl_warns)} 项 WARN" +
                      (f" —— {'、'.join(dl_fails)}" if dl_fails else ""))
     linept = f"- 领域目录准入 WARN（未初始化项目，建议 git init）：{'、'.join(dl_warns)}" if dl_warns else ""
     if linept:
