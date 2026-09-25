@@ -228,6 +228,10 @@ def _lint_state(root: Path) -> "tuple[str | None, bool, str]":
             except OSError:
                 has = False
         return "python", has, "ruff 配置（`pyproject.toml` 的 `[tool.ruff]` 或 `ruff.toml`）"
+    if (root / "Cargo.toml").is_file():
+        # Rust：fmt / clippy 由工具链自带，缺文件 ≠ 没规范 ⇒ 不判。
+        # （Rust + 前端壳的项目带 package.json，不先判会把它误判成 node 要求 eslint）
+        return None, True, ""
     if (root / "package.json").is_file():
         has = bool(list(root.glob(".eslintrc*")) or list(root.glob("eslint.config.*")))
         if not has:
